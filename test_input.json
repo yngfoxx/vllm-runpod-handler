@@ -1,0 +1,20 @@
+{
+    "input": {
+        "openai_route": "/v1/chat/completions",
+        "openai_input": {
+            "model": "local-model",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a sales-call sentiment classifier. Reply with exactly one word: positive, neutral, or negative."
+                },
+                {
+                    "role": "user",
+                    "content": "Customer: Honestly, this pricing is a lot higher than I was expecting."
+                }
+            ],
+            "max_tokens": 8,
+            "temperature": 0
+        }
+    }
+}
