@@ -74,7 +74,14 @@ The handler accepts any of these inside the job `input`:
 { "input": { "prompt": "…", "max_tokens": 128 } }
 ```
 
-Non-streaming returns the full OpenAI JSON response. For token streaming, set `ENABLE_STREAMING=true` (the worker registers a generator handler; consume via the endpoint's `/stream`, or the OpenAI passthrough with `stream: true`).
+The handler honors the **per-request** `stream` flag. A non-stream request always
+returns the full OpenAI JSON response (`chat.completion` with `choices[0].message`
+and `usage`) — this is true even when `ENABLE_STREAMING=true`, so an OpenAI
+non-stream client (e.g. LangChain's `ChatOpenAI.invoke`) is never handed
+`chat.completion.chunk` deltas. Setting `ENABLE_STREAMING=true` only *enables*
+token streaming for clients that opt in with `stream: true` (consume via the
+endpoint's `/stream` or the OpenAI passthrough); it no longer forces streaming on
+every request.
 
 ## Environment variables
 
@@ -89,7 +96,7 @@ Non-streaming returns the full OpenAI JSON response. For token streaming, set `E
 | `GPU_MEMORY_UTILIZATION` | `0.90`                         | Fraction of VRAM for weights + KV cache                         |
 | `MAX_NUM_SEQS`           | _(empty)_                      | Optional cap on concurrent sequences                            |
 | `ENABLE_PREFIX_CACHING`  | `true`                         | KV-cache prefix reuse across the 4 pipeline stages              |
-| `ENABLE_STREAMING`       | `false`                        | Register the streaming (generator) handler                      |
+| `ENABLE_STREAMING`       | `false`                        | Allow `stream: true` clients to stream. Non-stream requests still get full JSON either way |
 | `VLLM_API_KEY`           | _(empty)_                      | If set, the server requires this bearer token                   |
 | `VLLM_PORT`              | `8000`                         | Server port (local mode also exposes it)                        |
 | `TRUST_REMOTE_CODE`      | `false`                        | Only needed for models that require it (Qwen2.5 does not)       |

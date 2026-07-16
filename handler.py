@@ -159,12 +159,17 @@ def _resolve_request(job_input):
     return route, body
 
 
-def handler(job):
-    """Non-streaming: forward to the local OpenAI server, return the full JSON."""
-    try:
-        route, body = _resolve_request(job.get("input", {}) or {})
-    except ValueError as exc:
-        return {"error": str(exc)}
+def _wants_stream(body):
+    """Whether THIS request asked to stream. OpenAI clients send `stream: true`
+    to opt in; everything else (including LangChain's ChatOpenAI.invoke) is
+    non-stream and must receive a single complete response."""
+    return bool(body.get("stream", False))
+
+
+def _forward_full(route, body):
+    """POST to the local OpenAI server in non-stream mode and return the full
+    OpenAI JSON response (a chat.completion / completion object), or an error dict."""
+    body = dict(body)
     body["stream"] = False
     try:
         resp = requests.post(f"{LOCAL_BASE}{route}", json=body,
@@ -176,28 +181,56 @@ def handler(job):
     return resp.json()
 
 
+def handler(job):
+    """Non-streaming handler: always returns the full OpenAI JSON response.
+    Registered when ENABLE_STREAMING is false."""
+    try:
+        route, body = _resolve_request(job.get("input", {}) or {})
+    except ValueError as exc:
+        return {"error": str(exc)}
+    return _forward_full(route, body)
+
+
 def streaming_handler(job):
-    """Streaming: forward with stream=true and yield OpenAI SSE chunks verbatim."""
+    """Generator handler registered when ENABLE_STREAMING=true.
+
+    It honors the PER-REQUEST `stream` flag instead of streaming every request —
+    this is the fix for the `undefined ... generations[0][0].message` crash. A
+    non-stream request (which is every request the analysis app makes) yields
+    exactly ONE full chat.completion object, so an OpenAI-compatible non-stream
+    client receives a valid `choices[0].message` — not a lone chat.completion.chunk
+    delta. Only a client that explicitly sends `stream: true` gets SSE chunks.
+    """
     try:
         route, body = _resolve_request(job.get("input", {}) or {})
     except ValueError as exc:
         yield {"error": str(exc)}
         return
+
+    if not _wants_stream(body):
+        # Non-stream request: return the full response as a single yield.
+        yield _forward_full(route, body)
+        return
+
+    body = dict(body)
     body["stream"] = True
-    with requests.post(f"{LOCAL_BASE}{route}", json=body, headers=_internal_headers(),
-                       stream=True, timeout=REQUEST_TIMEOUT_S) as resp:
-        if resp.status_code != 200:
-            yield {"error": "vllm_error", "status_code": resp.status_code, "body": resp.text}
-            return
-        for raw in resp.iter_lines():
-            if not raw:
-                continue
-            line = raw.decode("utf-8", errors="ignore")
-            if line.startswith("data: "):
-                line = line[len("data: "):]
-            if line.strip() == "[DONE]":
-                break
-            yield line  # already-JSON OpenAI chunk, forwarded as-is
+    try:
+        with requests.post(f"{LOCAL_BASE}{route}", json=body, headers=_internal_headers(),
+                           stream=True, timeout=REQUEST_TIMEOUT_S) as resp:
+            if resp.status_code != 200:
+                yield {"error": "vllm_error", "status_code": resp.status_code, "body": resp.text}
+                return
+            for raw in resp.iter_lines():
+                if not raw:
+                    continue
+                line = raw.decode("utf-8", errors="ignore")
+                if line.startswith("data: "):
+                    line = line[len("data: "):]
+                if line.strip() == "[DONE]":
+                    break
+                yield line  # already-JSON OpenAI chunk, forwarded as-is
+    except requests.RequestException as exc:
+        yield {"error": f"upstream request failed: {exc}"}
 
 
 def run_serverless():
@@ -223,6 +256,13 @@ def run_serverless():
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
 
+    # Both registrations serve non-stream clients correctly:
+    #   ENABLE_STREAMING=false → `handler` returns the full JSON object.
+    #   ENABLE_STREAMING=true  → `streaming_handler` streams ONLY when the request
+    #                            set `stream: true`, and otherwise yields one full
+    #                            chat.completion. So a non-stream client (the app's
+    #                            ChatOpenAI.invoke path) is never handed SSE chunks,
+    #                            regardless of this flag.
     chosen = streaming_handler if ENABLE_STREAMING else handler
     config = {"handler": chosen}
     if ENABLE_STREAMING:
